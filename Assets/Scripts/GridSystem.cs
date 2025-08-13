@@ -18,6 +18,15 @@ namespace ToyBlast.Core
         private void Awake()
         {
             CalculateGridBounds();
+            InitializeTileArray();
+        }
+
+        /// <summary>
+        /// Tile array'ini başlat
+        /// </summary>
+        private void InitializeTileArray()
+        {
+            tileObjects = new GameObject[gridWidth, gridHeight];
         }
 
         /// <summary>
@@ -92,12 +101,92 @@ namespace ToyBlast.Core
             return IsValidGridPosition(gridPos.x, gridPos.y);
         }
 
-        // Properties
-        public int GridWidth => gridWidth;
-        public int GridHeight => gridHeight;
-        public float TileSize => tileSize;
-        public float TileSpacing => tileSpacing;
-        public Vector2 GridCenter => gridCenter;
+        [Header("Tile Settings")]
+        [SerializeField] private GameObject tilePrefab;
+
+        // Tile tracking
+        private GameObject[,] tileObjects;
+
+        /// <summary>
+        /// Belirtilen grid pozisyonuna tile spawn et
+        /// </summary>
+        public GameObject SpawnTile(int gridX, int gridY)
+        {
+            if (!IsValidGridPosition(gridX, gridY))
+            {
+                Debug.LogError($"Invalid spawn position: ({gridX}, {gridY})");
+                return null;
+            }
+
+            if (tilePrefab == null)
+            {
+                Debug.Log($"Tile Prefab: {tilePrefab?.name ?? "NULL"}");
+                Debug.LogError("Tile prefab not assigned!");
+                return null;
+            }
+
+            // Eğer zaten tile varsa, önce onu yok et
+            if (tileObjects[gridX, gridY] != null)
+            {
+                DestroyImmediate(tileObjects[gridX, gridY]);
+            }
+
+            // Yeni tile spawn et
+            Vector3 worldPos = GridToWorldPosition(gridX, gridY);
+            GameObject newTile = Instantiate(tilePrefab, worldPos, Quaternion.identity);
+            newTile.name = $"Tile_({gridX},{gridY})";
+            newTile.transform.SetParent(this.transform);
+
+            // Array'e kaydet
+            tileObjects[gridX, gridY] = newTile;
+
+            return newTile;
+        }
+
+        /// <summary>
+        /// Belirtilen pozisyondaki tile'ı yok et
+        /// </summary>
+        public void DestroyTile(int gridX, int gridY)
+        {
+            if (!IsValidGridPosition(gridX, gridY))
+                return;
+
+            if (tileObjects[gridX, gridY] != null)
+            {
+                DestroyImmediate(tileObjects[gridX, gridY]);
+                tileObjects[gridX, gridY] = null;
+            }
+        }
+
+        /// <summary>
+        /// Grid'i tile'larla doldur (test için)
+        /// </summary>
+        [ContextMenu("Fill Grid With Tiles")]
+        public void FillGridWithTiles()
+        {
+            for (int x = 0; x < gridWidth; x++)
+            {
+                for (int y = 0; y < gridHeight; y++)
+                {
+                    SpawnTile(x, y);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Tüm tile'ları temizle
+        /// </summary>
+        [ContextMenu("Clear All Tiles")]
+        public void ClearAllTiles()
+        {
+            for (int x = 0; x < gridWidth; x++)
+            {
+                for (int y = 0; y < gridHeight; y++)
+                {
+                    DestroyTile(x, y);
+                }
+            }
+        }
 
         // Debug için grid çizimi
         private void OnDrawGizmos()
@@ -125,5 +214,8 @@ namespace ToyBlast.Core
                 }
             }
         }
+        public int GridWidth => gridWidth;
+        public int GridHeight => gridHeight;
+
     }
 }
