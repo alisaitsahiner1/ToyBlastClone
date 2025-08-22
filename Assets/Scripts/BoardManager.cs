@@ -9,62 +9,56 @@ namespace ToyBlast.Managers
 {
     public class BoardManager : MonoBehaviour
     {
+        [SerializeField] private ToyBlast.Events.GameEventHub eventHub;
+
         [SerializeField] private GridSystem gridSystem;
         [SerializeField] private GameObject[] blockPrefabs;
         [SerializeField] private Transform blocksParent;
         private Block[,] blocks;
 
-        [SerializeField] private GameObject[] particlePrefabs;
 
-        private Dictionary<BlockColor, GameObject> particleMap;
+        private Vector3 verticalStep;   // bir hücrelik dikey world farkı
+        [SerializeField] private int spawnAboveOffset = 50; // grid üstünden kaç satır yukarıdan başlasın
+     // [SerializeField] private float fallDuration = 0.25f;
 
+        [SerializeField] private int baseSorting = 0;
+
+        [SerializeField] private float bounceOvershootCells = 0.015f; // bir hücrenin %si kadar aşırma (0.10–0.20 arası güzel)
+        [SerializeField] private Vector2 bounceDurRange = new Vector2(0.06f, 0.14f); // aşağı ve yukarı adımlar için süre aralığı
+        [SerializeField] private int bounceMaxCellsScale = 6; // 6 hücreden daha uzun düşüşler için şiddeti clamp'le
+
+        [SerializeField] private float fallSpeedCellsPerSecond = 12f; // tek gerçek hız (hücre/sn)
+        [SerializeField] private float minFallDuration = 0.06f;       // çok kısa atlamaları yumuşat
+
+        // fields
+        private int _activeTweens;
+        
+        // abonelik:
+        private void OnEnable()  => eventHub.CellClicked.AddListener(OnCellClicked);
+        private void OnDisable() => eventHub.CellClicked.RemoveListener(OnCellClicked);
 
 
         private void Start()
         {
             GenerateInitialBoard();
 
-            particleMap = new Dictionary<BlockColor, GameObject>();
 
-            foreach (GameObject ps in particlePrefabs)
+            // DİKKAT: GridHeight >= 2 ise güvenli. Eğer 1 ise, alternatif hesap yaparız.
+            if (gridSystem.GridHeight >= 2)
             {
-                BlockColor color = ps.GetComponent<ParticleColorTag>().Color;
-                particleMap[color] = ps;
+                var p0 = gridSystem.GridToWorldPosition(0, 0);
+                var p1 = gridSystem.GridToWorldPosition(0, 1);
+                verticalStep = p1 - p0;  // "bir hücre yukarı" world vektörü
             }
-            
+            else
+            {
+                // Fallback: 1 hücrelik world adımı tahmini (oyunun ölçüsüne göre ayarla)
+                verticalStep = Vector3.up * 1f;
+            }
         }
 
         private void Update()
         {
-            if (Mouse.current.leftButton.wasPressedThisFrame)
-            {
-                Vector2 mouseScreenPos = Mouse.current.position.ReadValue();
-                Vector3 mouseWorldPos = Camera.main.ScreenToWorldPoint(mouseScreenPos);
-                mouseWorldPos.z = 0f;
-
-                Vector2Int gridPos = gridSystem.WorldToGridPosition(mouseWorldPos);
-
-                if (gridSystem.IsValidGridPosition(gridPos))
-                {
-                    Block clickedBlock = blocks[gridPos.x, gridPos.y];
-
-                    if (clickedBlock != null)
-                    {
-                        Debug.Log($"Tıklanan blok: {clickedBlock.Color} [{gridPos.x}, {gridPos.y}]");
-
-                        List<Vector2Int> connectedBlocks = FindConnectedBlocks(gridPos);
-
-                        if (connectedBlocks.Count >= 2)
-                        {
-                            DestroyBlocks(connectedBlocks);
-                        }
-
-                        DropBlocks();
-                        
-
-                    }
-                }
-            }
 
         }
 
@@ -78,19 +72,16 @@ namespace ToyBlast.Managers
                 for (int y = 0; y < gridSystem.GridHeight; y++)
                 {
                     int randomIndex = Random.Range(0, blockPrefabs.Length);
-                    GameObject randomBlock = Instantiate(blockPrefabs[randomIndex]);
-                    randomBlock.transform.position = gridSystem.GridToWorldPosition(x, y);
+                    Vector3 pos = gridSystem.GridToWorldPosition(x, y);
+                    GameObject randomBlock = Instantiate(blockPrefabs[randomIndex], pos, Quaternion.identity, blocksParent);
 
-                    SpriteRenderer sr = randomBlock.GetComponent<SpriteRenderer>();
-                    if (sr != null)
-                    {
-                        sr.sortingOrder = +y;
-                    }
-
-                    randomBlock.transform.parent = blocksParent;
-
+                    // ... instantiate ettikten sonra:
                     Block block = randomBlock.GetComponent<Block>();
                     blocks[x, y] = block;
+
+                    // Sıralamayı TEK YERDEN ayarla
+                    ApplySortingAt(x, y);
+
                 }
             }
         }
@@ -141,23 +132,24 @@ namespace ToyBlast.Managers
 
         private void DestroyBlocks(List<Vector2Int> blockPositions)
         {
+            int destroyedCount = blockPositions.Count;
+
             foreach (Vector2Int pos in blockPositions)
             {
-                Block block = blocks[pos.x, pos.y];
-                GameObject prefab;
-                if (particleMap.TryGetValue(block.Color, out prefab))
-                {
-                    var go = Instantiate(prefab, block.transform.position + Vector3.back * 0.1f, Quaternion.identity);
-                    var ps = go.GetComponentInChildren<ParticleSystem>();
-                    ps?.Play();
-                    Destroy(go, ps.main.duration + ps.main.startLifetime.constantMax);
-                }
+                var block = blocks[pos.x, pos.y];
+                int colorIndex = (int)block.Color;
 
-                    Destroy(block.gameObject);
-                    blocks[pos.x, pos.y] = null;
-                }
+                eventHub?.BlockDestroyed?.Invoke(pos.x, pos.y, colorIndex);
+
+                Destroy(block.gameObject);
+                blocks[pos.x, pos.y] = null;
+
             }
-        
+
+            eventHub?.BlocksDestroyed?.Invoke(destroyedCount);
+
+        }
+
 
         private void DropBlocks()
         {
@@ -179,14 +171,205 @@ namespace ToyBlast.Managers
 
                         Vector3 targetPos = gridSystem.GridToWorldPosition(x, fallToY);
 
+                        // hedef belirlendikten sonra:
+                        Vector3 startPosNow = fallingBlock.transform.position;
+                        float dur = ComputeFallDuration(startPosNow, targetPos);
+
+                        int lx = x, ly = fallToY;
+                        int fallCells = Mathf.Abs(y - fallToY);
+
+                        _activeTweens++; // DOMove başlamadan hemen önce
+
                         fallingBlock.transform
-                            .DOMove(targetPos, 0.25f)
-                            .SetEase(Ease.OutQuad);
+                            .DOMove(targetPos, dur)
+                            .SetEase(Ease.Linear)
+                            .OnComplete(() =>
+                            {
+                                ApplySortingAt(lx, ly);
+                                // bounce'i al ve tamamlandığında sayaç düş + event
+                                var bounce = PlayLandBounce(fallingBlock.transform, targetPos, fallCells);
+                                bounce.OnComplete(() =>
+                                {
+                                    eventHub?.BlockLanded?.Invoke(lx, ly, (int)blocks[lx, ly].Color);
+
+                                    if (--_activeTweens == 0)
+                                        eventHub?.BoardSettled?.Invoke();
+                                });
+                            });
+
+
                     }
                 }
             }
         }
 
+        private int[] CalculateMissingCountsPerColumn()
+        {
+            int w = gridSystem.GridWidth;
+            int h = gridSystem.GridHeight;
+            var counts = new int[w];
 
+            for (int x = 0; x < w; x++)
+            {
+                int missing = 0;
+                for (int y = 0; y < h; y++)
+                {
+                    if (blocks[x, y] == null)
+                        missing++;
+                }
+                counts[x] = missing;
+            }
+
+            return counts;
+        }
+
+        private void SpawnMissingBlocks()
+        {
+            int w = gridSystem.GridWidth;
+            int h = gridSystem.GridHeight;
+
+            // 1) Her kolon için eksik sayısını al
+            int[] counts = CalculateMissingCountsPerColumn();
+
+            for (int x = 0; x < w; x++)
+            {
+                int m = counts[x];           // bu kolonda kaç yeni küp spawn edilecek
+                if (m <= 0) continue;
+
+                // Stack tabanı: en üst satır world + spawnAboveOffset
+                Vector3 topWorld = gridSystem.GridToWorldPosition(x, h - 1);
+                Vector3 baseStart = topWorld + verticalStep * spawnAboveOffset;
+
+                // Alttan üste doğru boş hücreleri taramak için bir pointer
+                int yPtr = 0;
+
+                // 2) m adet küpü ÜST ÜSTE DİZ ve AYNI ANDA düşür
+                for (int i = 0; i < m; i++)
+                {
+                    // bir sonraki boş y'yi bul
+                    while (yPtr < h && blocks[x, yPtr] != null) yPtr++;
+                    if (yPtr >= h) break; // emniyet
+
+                    int targetY = yPtr;
+
+                    Vector3 startPos = baseStart + verticalStep * i;            // üst üste istif
+                    Vector3 targetPos = gridSystem.GridToWorldPosition(x, targetY);
+
+                    int rand = Random.Range(0, blockPrefabs.Length);
+                    GameObject go = Instantiate(blockPrefabs[rand], startPos, Quaternion.identity, blocksParent);
+                    Block b = go.GetComponent<Block>();
+
+                    // Diziyi hedefte doldur (yerine düşecek olan blok bu)
+                    blocks[x, targetY] = b;
+
+                    // Sıralamayı hedef Y'ye göre ata (hemen + tween bitince tekrar)
+                    ApplySortingAt(x, targetY);
+
+                    float dur = ComputeFallDuration(startPos, targetPos);
+
+                    int lx = x, ly = targetY;
+                    int fallCells = Mathf.Max(1,
+                        Mathf.RoundToInt(Vector3.Distance(startPos, targetPos) / verticalStep.magnitude));
+
+                    _activeTweens++; // DOMove başlamadan önce
+
+                    b.transform
+                    .DOMove(targetPos, dur)
+                    .SetEase(Ease.Linear)
+                    .OnComplete(() =>
+                    {
+                        ApplySortingAt(lx, ly);
+                        var bounce = PlayLandBounce(b.transform, targetPos, fallCells);
+                        bounce.OnComplete(() =>
+                        {
+                            eventHub?.BlockSpawnedAndLanded?.Invoke(lx, ly, (int)b.Color);
+
+                            if (--_activeTweens == 0)
+                                eventHub?.BoardSettled?.Invoke();
+                        });
+                    });
+
+
+
+                }
+            }
+        }
+
+
+
+        // Tek bir hücre için order ayarla
+        private void ApplySortingAt(int x, int y)
+        {
+            // bounds guard
+            if (x < 0 || x >= gridSystem.GridWidth || y < 0 || y >= gridSystem.GridHeight)
+                return;
+
+            var b = blocks[x, y];
+            if (b == null) return;
+
+            var sr = b.GetComponent<SpriteRenderer>();
+            if (sr != null)
+                sr.sortingOrder = baseSorting + y; // en alttan yukarıya doğru artar
+        }
+
+        // (İsteğe bağlı) tüm tahtayı güncelle
+        private void ApplySortingForAll()
+        {
+            for (int x = 0; x < gridSystem.GridWidth; x++)
+                for (int y = 0; y < gridSystem.GridHeight; y++)
+                    ApplySortingAt(x, y);
+        }
+
+        private Tween PlayLandBounce(Transform tr, Vector3 targetPos, int fallCells)
+        {
+            float cellMag = verticalStep.magnitude;                 // 1 hücrelik world mesafesi
+            int fc = Mathf.Clamp(fallCells, 1, bounceMaxCellsScale);
+
+            // şiddet: uzun düşüşte biraz art, ama clamp'li
+            float overshoot = Mathf.Clamp(bounceOvershootCells * cellMag * fc, 0f, 0.25f * cellMag);
+
+            // süreleri düşüş uzunluğuna göre hafifçe ölçekle
+            float mid = (bounceDurRange.x + bounceDurRange.y) * 0.5f;
+            float k = Mathf.Clamp01((fc - 1f) / (bounceMaxCellsScale - 1f));
+            float upDur = Mathf.Lerp(bounceDurRange.x, mid, k);
+            float downDur = Mathf.Lerp(mid, bounceDurRange.y, k);
+
+            // HEDEFİN biraz ÜSTÜNE çık, sonra hedefe geri dön
+            Vector3 peak = targetPos + verticalStep.normalized * overshoot;
+
+            tr.DOKill(false); // mevcut pozisyon tweeenlerini temizle (scale vs. dokunmuyor)
+            var seq = DOTween.Sequence();
+            seq.Append(tr.DOMove(peak, upDur).SetEase(Ease.OutQuad)); // mini yukarı zıpla
+            seq.Append(tr.DOMove(targetPos, downDur).SetEase(Ease.InQuad)); // hedefe otur
+
+            return seq;
+        }
+   
+        private float ComputeFallDuration(Vector3 startPos, Vector3 targetPos)
+        {
+            float cell = verticalStep.magnitude;             // 1 hücrenin world uzunluğu
+            float dist = (targetPos - startPos).magnitude;   // world mesafe
+            float dur  = dist / (cell * Mathf.Max(0.0001f, fallSpeedCellsPerSecond));
+            return Mathf.Max(minFallDuration, dur);
+        }   
+// tıklama akışı (eski Update içeriği burada çalışır)
+        private void OnCellClicked(int x, int y)
+        {
+            var clicked = blocks[x, y];
+            if (clicked == null) return;
+
+            var connected = FindConnectedBlocks(new Vector2Int(x, y));
+            if (connected.Count >= 2)
+            {
+                DestroyBlocks(connected);
+            }
+
+            DropBlocks();
+            SpawnMissingBlocks();
+
+            if (_activeTweens == 0)
+                eventHub?.BoardSettled?.Invoke();
+        }   
+   
     }
 }

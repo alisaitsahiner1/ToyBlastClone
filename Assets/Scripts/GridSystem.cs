@@ -10,6 +10,14 @@ namespace ToyBlast.Core
         [SerializeField] private float tileSize = 1.0f;
         [SerializeField] private float tileSpacing = 0.1f;
 
+        [Header("Tile Settings")]
+        [SerializeField] private GameObject tilePrefab;
+
+        // Tile tracking
+        private GameObject[,] tileObjects;
+
+
+
         // Grid bounds
         private Vector2 gridCenter;
         private Vector2 gridBottomLeft;
@@ -21,17 +29,11 @@ namespace ToyBlast.Core
             InitializeTileArray();
         }
 
-        /// <summary>
-        /// Tile array'ini başlat
-        /// </summary>
         private void InitializeTileArray()
         {
             tileObjects = new GameObject[gridWidth, gridHeight];
         }
 
-        /// <summary>
-        /// Grid sınırlarını hesapla
-        /// </summary>
         private void CalculateGridBounds()
         {
             // Toplam grid boyutu (tile + spacing)
@@ -46,12 +48,7 @@ namespace ToyBlast.Core
             gridTopRight = gridCenter + new Vector2(totalWidth * 0.5f, totalHeight * 0.5f);
         }
 
-        /// <summary>
-        /// Grid koordinatını world pozisyonuna çevir
-        /// </summary>
-        /// <param name="gridX">Grid X koordinatı (0-8)</param>
-        /// <param name="gridY">Grid Y koordinatı (0-8)</param>
-        /// <returns>World pozisyonu</returns>
+
         public Vector3 GridToWorldPosition(int gridX, int gridY)
         {
             if (!IsValidGridPosition(gridX, gridY))
@@ -66,11 +63,6 @@ namespace ToyBlast.Core
             return new Vector3(worldX, worldY, 0f);
         }
 
-        /// <summary>
-        /// World pozisyonunu grid koordinatına çevir
-        /// </summary>
-        /// <param name="worldPosition">World pozisyonu</param>
-        /// <returns>Grid koordinatı (Vector2Int)</returns>
         public Vector2Int WorldToGridPosition(Vector3 worldPosition)
         {
             float localX = worldPosition.x - gridBottomLeft.x;
@@ -82,34 +74,17 @@ namespace ToyBlast.Core
             return new Vector2Int(gridX, gridY);
         }
 
-        /// <summary>
-        /// Grid pozisyonu geçerli mi kontrol et
-        /// </summary>
-        /// <param name="gridX">Grid X koordinatı</param>
-        /// <param name="gridY">Grid Y koordinatı</param>
-        /// <returns>Geçerli ise true</returns>
         public bool IsValidGridPosition(int gridX, int gridY)
         {
             return gridX >= 0 && gridX < gridWidth && gridY >= 0 && gridY < gridHeight;
         }
 
-        /// <summary>
-        /// Grid pozisyonu geçerli mi kontrol et (Vector2Int)
-        /// </summary>
         public bool IsValidGridPosition(Vector2Int gridPos)
         {
             return IsValidGridPosition(gridPos.x, gridPos.y);
         }
 
-        [Header("Tile Settings")]
-        [SerializeField] private GameObject tilePrefab;
 
-        // Tile tracking
-        private GameObject[,] tileObjects;
-
-        /// <summary>
-        /// Belirtilen grid pozisyonuna tile spawn et
-        /// </summary>
         public GameObject SpawnTile(int gridX, int gridY)
         {
             if (!IsValidGridPosition(gridX, gridY))
@@ -143,9 +118,6 @@ namespace ToyBlast.Core
             return newTile;
         }
 
-        /// <summary>
-        /// Belirtilen pozisyondaki tile'ı yok et
-        /// </summary>
         public void DestroyTile(int gridX, int gridY)
         {
             if (!IsValidGridPosition(gridX, gridY))
@@ -158,9 +130,6 @@ namespace ToyBlast.Core
             }
         }
 
-        /// <summary>
-        /// Grid'i tile'larla doldur (test için)
-        /// </summary>
         [ContextMenu("Fill Grid With Tiles")]
         public void FillGridWithTiles()
         {
@@ -173,9 +142,6 @@ namespace ToyBlast.Core
             }
         }
 
-        /// <summary>
-        /// Tüm tile'ları temizle
-        /// </summary>
         [ContextMenu("Clear All Tiles")]
         public void ClearAllTiles()
         {
