@@ -3,6 +3,9 @@ using ToyBlast.Core;
 using UnityEngine.InputSystem;
 using System.Collections.Generic;   // List, Queue
 using DG.Tweening;
+using System.Collections;
+using UnityEditor.Experimental.GraphView; // IEnumerator için
+
 
 
 namespace ToyBlast.Managers
@@ -19,7 +22,7 @@ namespace ToyBlast.Managers
 
         private Vector3 verticalStep;   // bir hücrelik dikey world farkı
         [SerializeField] private int spawnAboveOffset = 50; // grid üstünden kaç satır yukarıdan başlasın
-     // [SerializeField] private float fallDuration = 0.25f;
+                                                            // [SerializeField] private float fallDuration = 0.25f;
 
         [SerializeField] private int baseSorting = 0;
 
@@ -30,12 +33,42 @@ namespace ToyBlast.Managers
         [SerializeField] private float fallSpeedCellsPerSecond = 12f; // tek gerçek hız (hücre/sn)
         [SerializeField] private float minFallDuration = 0.06f;       // çok kısa atlamaları yumuşat
 
+        [SerializeField] private int startingMoves = 20;
+        private int moves;
+
+        [SerializeField] private GameObject rocketPrefab;
+        [SerializeField] private GameObject tntPrefab;
+        [SerializeField] private GameObject rubikPrefab;
+
+        [SerializeField] private float rocketStepDelay = 0.05f; // adım adım yok etme gecikmesi
+        [SerializeField] private float puzzleFocusDelay = 0.35f; // odaklanma bekleme süresi
+
+        private bool _resolving = false;                         // patlama sırasında ikinci tıklamayı kilitle
+
+        private int _resolveDepth = 0;   // zincir derinliği
+
+        private HashSet<Vector2Int> _destroyedThisResolve; // bu çözüm sırasında zaten silinmiş hücreler
+        private HashSet<Vector2Int> _activatingPowerups = new HashSet<Vector2Int>();
+
+
+
+
+
         // fields
         private int _activeTweens;
-        
+
         // abonelik:
-        private void OnEnable()  => eventHub.CellClicked.AddListener(OnCellClicked);
-        private void OnDisable() => eventHub.CellClicked.RemoveListener(OnCellClicked);
+        private void OnEnable()
+        {
+            eventHub.CellClicked.AddListener(OnCellClicked);
+            eventHub.BoardSettled.AddListener(RecomputeAllHints); // <-- yeni ekledik
+        }
+
+        private void OnDisable()
+        {
+            eventHub.CellClicked.RemoveListener(OnCellClicked);
+            eventHub.BoardSettled.RemoveListener(RecomputeAllHints); // <-- yeni ekledik
+        }
 
 
         private void Start()
@@ -55,6 +88,12 @@ namespace ToyBlast.Managers
                 // Fallback: 1 hücrelik world adımı tahmini (oyunun ölçüsüne göre ayarla)
                 verticalStep = Vector3.up * 1f;
             }
+
+            moves = startingMoves;
+            eventHub?.MovesChanged?.Invoke(moves);
+
+            RecomputeAllHints();
+
         }
 
         private void Update()
@@ -90,7 +129,8 @@ namespace ToyBlast.Managers
         {
             List<Vector2Int> connected = new List<Vector2Int>();
             Block startBlock = blocks[startPos.x, startPos.y];
-            if (startBlock == null) return connected;
+            if (startBlock == null || startBlock.IsPowerup)
+                return connected;   // Powerup bloklardan grup başlamasın
 
             BlockColor targetColor = startBlock.Color;
             bool[,] visited = new bool[gridSystem.GridWidth, gridSystem.GridHeight];
@@ -119,36 +159,57 @@ namespace ToyBlast.Managers
                     if (visited[neighbor.x, neighbor.y]) continue;
 
                     Block neighborBlock = blocks[neighbor.x, neighbor.y];
-                    if (neighborBlock != null && neighborBlock.Color == targetColor)
+
+                    if (neighborBlock != null
+                        && !neighborBlock.IsPowerup               // <<< ek
+                        && neighborBlock.Color == targetColor)
                     {
                         toCheck.Enqueue(neighbor);
                         visited[neighbor.x, neighbor.y] = true;
                     }
+
+
                 }
+
             }
+
+
 
             return connected;
         }
 
         private void DestroyBlocks(List<Vector2Int> blockPositions)
         {
-            int destroyedCount = blockPositions.Count;
+            int destroyedCount = 0;
 
             foreach (Vector2Int pos in blockPositions)
             {
-                var block = blocks[pos.x, pos.y];
-                int colorIndex = (int)block.Color;
+                // 1) aynı çözümde aynı hücreyi iki kere silme
+                if (_destroyedThisResolve != null && !_destroyedThisResolve.Add(pos))
+                    continue;
 
+                var block = blocks[pos.x, pos.y];
+                if (block == null) continue;   // zaten silinmiş olabilir -> atla
+
+                // 2) bu objeye bağlı TÜM tween’leri öldür (DOMove, bounce vs.)
+                var tr = block.transform;
+                if (tr != null) tr.DOKill(false);
+                DOTween.Kill(block, false);
+
+                // 3) event’te powerup’ları -1 ile geç (renk partikülü çalışmasın)
+                int colorIndex = block.IsPowerup ? -1 : (int)block.Color;
                 eventHub?.BlockDestroyed?.Invoke(pos.x, pos.y, colorIndex);
 
+                // 4) objeyi sil ve diziyi boşalt
                 Destroy(block.gameObject);
                 blocks[pos.x, pos.y] = null;
 
+                destroyedCount++;
             }
 
             eventHub?.BlocksDestroyed?.Invoke(destroyedCount);
-
         }
+
 
 
         private void DropBlocks()
@@ -169,6 +230,9 @@ namespace ToyBlast.Managers
                         blocks[x, y] = null;
                         blocks[x, fallToY] = fallingBlock;
 
+                        if (fallingBlock == null || fallingBlock.transform == null)  // <<< EMNİYET
+                            continue;
+
                         Vector3 targetPos = gridSystem.GridToWorldPosition(x, fallToY);
 
                         // hedef belirlendikten sonra:
@@ -180,6 +244,8 @@ namespace ToyBlast.Managers
 
                         _activeTweens++; // DOMove başlamadan hemen önce
 
+                        if (fallingBlock == null || fallingBlock.transform == null) continue; // DOMove’dan HEMEN önce
+
                         fallingBlock.transform
                             .DOMove(targetPos, dur)
                             .SetEase(Ease.Linear)
@@ -187,14 +253,28 @@ namespace ToyBlast.Managers
                             {
                                 ApplySortingAt(lx, ly);
                                 // bounce'i al ve tamamlandığında sayaç düş + event
-                                var bounce = PlayLandBounce(fallingBlock.transform, targetPos, fallCells);
-                                bounce.OnComplete(() =>
+                                if (fallingBlock != null && fallingBlock.transform != null)
                                 {
-                                    eventHub?.BlockLanded?.Invoke(lx, ly, (int)blocks[lx, ly].Color);
+                                    var bounce = PlayLandBounce(fallingBlock.transform, targetPos, fallCells);
+                                    bounce.OnComplete(() =>
+                                    {
+                                        int colorIdx = -1;
+                                        if (lx >= 0 && lx < gridSystem.GridWidth &&
+                                            ly >= 0 && ly < gridSystem.GridHeight &&
+                                            blocks[lx, ly] != null && !blocks[lx, ly].IsPowerup)
+                                        {
+                                            colorIdx = (int)blocks[lx, ly].Color;
+                                        }
 
-                                    if (--_activeTweens == 0)
-                                        eventHub?.BoardSettled?.Invoke();
-                                });
+                                        eventHub?.BlockLanded?.Invoke(lx, ly, colorIdx);
+                                        if (--_activeTweens == 0) eventHub?.BoardSettled?.Invoke();
+                                    });
+                                }
+                                else
+                                {
+                                    if (--_activeTweens == 0) eventHub?.BoardSettled?.Invoke();
+                                }
+
                             });
 
 
@@ -273,20 +353,36 @@ namespace ToyBlast.Managers
 
                     _activeTweens++; // DOMove başlamadan önce
 
+                    if (b == null || b.transform == null) continue;  // <<< EMNİYET
+
                     b.transform
                     .DOMove(targetPos, dur)
                     .SetEase(Ease.Linear)
                     .OnComplete(() =>
                     {
                         ApplySortingAt(lx, ly);
-                        var bounce = PlayLandBounce(b.transform, targetPos, fallCells);
-                        bounce.OnComplete(() =>
+                        if (b != null && b.transform != null)
                         {
-                            eventHub?.BlockSpawnedAndLanded?.Invoke(lx, ly, (int)b.Color);
+                            var bounce = PlayLandBounce(b.transform, targetPos, fallCells);
+                            bounce.OnComplete(() =>
+                            {
+                                int colorIdx = -1;
+                                if (lx >= 0 && lx < gridSystem.GridWidth &&
+                                    ly >= 0 && ly < gridSystem.GridHeight &&
+                                    blocks[lx, ly] != null && !blocks[lx, ly].IsPowerup)
+                                {
+                                    colorIdx = (int)blocks[lx, ly].Color;
+                                }
 
-                            if (--_activeTweens == 0)
-                                eventHub?.BoardSettled?.Invoke();
-                        });
+                                eventHub?.BlockLanded?.Invoke(lx, ly, colorIdx);
+                                if (--_activeTweens == 0) eventHub?.BoardSettled?.Invoke();
+                            });
+                        }
+                        else
+                        {
+                            if (--_activeTweens == 0) eventHub?.BoardSettled?.Invoke();
+                        }
+
                     });
 
 
@@ -322,6 +418,9 @@ namespace ToyBlast.Managers
 
         private Tween PlayLandBounce(Transform tr, Vector3 targetPos, int fallCells)
         {
+            if (tr == null) return DOTween.Sequence(); // boş sequence; OnComplete set edilirse hemen çalışır
+
+
             float cellMag = verticalStep.magnitude;                 // 1 hücrelik world mesafesi
             int fc = Mathf.Clamp(fallCells, 1, bounceMaxCellsScale);
 
@@ -344,32 +443,436 @@ namespace ToyBlast.Managers
 
             return seq;
         }
-   
+
         private float ComputeFallDuration(Vector3 startPos, Vector3 targetPos)
         {
             float cell = verticalStep.magnitude;             // 1 hücrenin world uzunluğu
             float dist = (targetPos - startPos).magnitude;   // world mesafe
-            float dur  = dist / (cell * Mathf.Max(0.0001f, fallSpeedCellsPerSecond));
+            float dur = dist / (cell * Mathf.Max(0.0001f, fallSpeedCellsPerSecond));
             return Mathf.Max(minFallDuration, dur);
-        }   
-// tıklama akışı (eski Update içeriği burada çalışır)
+        }
+        // tıklama akışı (eski Update içeriği burada çalışır)
         private void OnCellClicked(int x, int y)
         {
+
+            if (_resolving) return; // şu an patlama çözülüyorsa tıklama alma
+
+            var clickedBlock = blocks[x, y];
+            if (clickedBlock != null && clickedBlock.IsPowerup && clickedBlock.PowerupKind == HintPowerupKind.Rocket)
+            {
+                StartCoroutine(ActivateRocket(x, y, clickedBlock.RocketOrientation));
+                return;
+            }
+
+            if (clickedBlock != null && clickedBlock.IsPowerup && clickedBlock.PowerupKind == HintPowerupKind.TNT)
+            {
+                StartCoroutine(ActivateTNT(x, y));
+                return;
+            }
+
+            if (clickedBlock != null && clickedBlock.IsPowerup && clickedBlock.PowerupKind == HintPowerupKind.Rubik)
+            {
+                var targetColor = clickedBlock.OriginColorForVFX; // <<< Artık sabit "Red" değil
+                StartCoroutine(ActivatePuzzle(x, y, targetColor));
+                return;
+            }
+
+            if (moves <= 0) return;
+
             var clicked = blocks[x, y];
             if (clicked == null) return;
 
             var connected = FindConnectedBlocks(new Vector2Int(x, y));
-            if (connected.Count >= 2)
+            if (connected.Count < 2)
+                return;
+
+            // 1) Kaçlı → powerup türü
+            var kind = EvaluateHintByCount(connected.Count);
+
+            if (kind != HintPowerupKind.None)
             {
+                // İPUCU: görsel çakışma olmasın diye mevcut hintleri önce temizle
+                ClearAllHints();   // (bir önceki adımda eklediğimiz yardımcı)
+
+                // 3) Kümeyi patlatmadan ÖNCE:
+                BlockColor originColor = blocks[x, y].Color;
+
+                // 2) Roketse yön seç
+                var rocketOri = (kind == HintPowerupKind.Rocket)
+                    ? DecideRocketOrientation(connected)
+                    : RocketOrientation.Vertical; // (TNT/Rubik için önemsiz)
+
+                // 3) Kümeyi patlat
+                DestroyBlocks(connected);
+
+                // 4) Powerup doğururken bu rengi ilet
+                SpawnPowerupAt(x, y, kind, rocketOri, originColor); // imzayı bir kez genişleteceğiz
+            }
+            else
+            {
+                // <5 ise normal patlat
                 DestroyBlocks(connected);
             }
 
+            // 5) Yerçekimi ve doldurma her zamanki gibi
             DropBlocks();
             SpawnMissingBlocks();
 
             if (_activeTweens == 0)
                 eventHub?.BoardSettled?.Invoke();
-        }   
-   
+        }
+
+        private HintPowerupKind EvaluateHintByCount(int c)
+        {
+            if (c >= 9) return HintPowerupKind.Rubik;
+            if (c >= 7) return HintPowerupKind.TNT;
+            if (c >= 5) return HintPowerupKind.Rocket;
+            return HintPowerupKind.None;
+        }
+
+        private void ClearAllHints()
+        {
+            for (int x = 0; x < gridSystem.GridWidth; x++)
+                for (int y = 0; y < gridSystem.GridHeight; y++)
+                    blocks[x, y]?.ClearHint();
+        }
+
+        private void RecomputeAllHints()
+        {
+            ClearAllHints();
+
+            bool[,] visited = new bool[gridSystem.GridWidth, gridSystem.GridHeight];
+
+            for (int x = 0; x < gridSystem.GridWidth; x++)
+            {
+                for (int y = 0; y < gridSystem.GridHeight; y++)
+                {
+                    if (visited[x, y] || blocks[x, y] == null) continue;
+
+                    var cluster = FindConnectedBlocks(new Vector2Int(x, y));
+                    foreach (var p in cluster) visited[p.x, p.y] = true;
+
+                    var kind = EvaluateHintByCount(cluster.Count);
+                    if (kind == HintPowerupKind.None) continue;
+
+                    foreach (var p in cluster)
+                        blocks[p.x, p.y]?.ShowHint(kind);
+                }
+            }
+        }
+
+        private RocketOrientation DecideRocketOrientation(List<Vector2Int> cluster)
+        {
+            int minX = int.MaxValue, maxX = int.MinValue, minY = int.MaxValue, maxY = int.MinValue;
+            foreach (var p in cluster)
+            {
+                minX = Mathf.Min(minX, p.x); maxX = Mathf.Max(maxX, p.x);
+                minY = Mathf.Min(minY, p.y); maxY = Mathf.Max(maxY, p.y);
+            }
+            int width = (maxX - minX + 1);
+            int height = (maxY - minY + 1);
+            return (width >= height) ? RocketOrientation.Horizontal : RocketOrientation.Vertical;
+        }
+
+        private void SpawnPowerupAt(int x, int y, HintPowerupKind kind, RocketOrientation rocketOri, BlockColor originColor)
+        {
+            GameObject prefab = null;
+            switch (kind)
+            {
+                case HintPowerupKind.Rocket: prefab = rocketPrefab; break;
+                case HintPowerupKind.TNT: prefab = tntPrefab; break;
+                case HintPowerupKind.Rubik: prefab = rubikPrefab; break;
+                default: return;
+            }
+
+            var worldPos = gridSystem.GridToWorldPosition(x, y);
+            var go = Instantiate(prefab, worldPos, Quaternion.identity, blocksParent);
+
+            // Roket prefabi dikey ise varsayılan kalsın; yatay istiyorsak 90° çevirebiliriz:
+            if (kind == HintPowerupKind.Rocket && rocketOri == RocketOrientation.Horizontal)
+                go.transform.rotation = Quaternion.Euler(0, 0, 90f);
+
+            var b = go.GetComponent<Block>();
+            b.SetPowerup(kind, rocketOri);
+            b.SetOriginColor(originColor);
+            blocks[x, y] = b;              // ızgarayı doldur
+            ApplySortingAt(x, y);          // sorting order tutarlı kalsın
+        }
+
+        private BlockColor GetPowerupTargetColor(Block b)
+        {
+            return b.OriginColorForVFX;
+        }
+
+
+        private IEnumerator ActivateRocket(int cx, int cy, RocketOrientation orientation)
+        {
+            BeginResolve();
+
+            _resolving = true;
+            ClearAllHints(); // ikonlu hintleri kapat, görsel karışıklık olmasın
+
+            // 0) Roketin kendisini önce yok et
+            DestroyBlocks(new List<Vector2Int> { new Vector2Int(cx, cy) });
+            yield return new WaitForSeconds(rocketStepDelay);
+
+            if (orientation == RocketOrientation.Horizontal)
+            {
+                int step = 1;
+                while (true)
+                {
+                    var burst = new List<Vector2Int>();
+
+                    int lx = cx - step;
+                    int rx = cx + step;
+
+                    bool anyInside = false;
+
+                    // SOL hücre
+                    if (lx >= 0)
+                    {
+                        anyInside = true;
+                        if (blocks[lx, cy] != null)
+                        {
+                            if (blocks[lx, cy].IsPowerup)
+                            {
+                                // önce powerup'ı tetikle
+                                TriggerPowerupAt_FireAndForget(lx, cy);
+                                // tetiklediğimiz için normal yok etme listesine EKLEME
+                            }
+                            else
+                            {
+                                burst.Add(new Vector2Int(lx, cy));
+                            }
+                        }
+                    }
+
+                    // SAĞ hücre
+                    if (rx < gridSystem.GridWidth)
+                    {
+                        anyInside = true;
+                        if (blocks[rx, cy] != null)
+                        {
+                            if (blocks[rx, cy].IsPowerup)
+                            {
+                               TriggerPowerupAt_FireAndForget(rx, cy);
+                            }
+                            else
+                            {
+                                burst.Add(new Vector2Int(rx, cy));
+                            }
+                        }
+                    }
+
+                    if (!anyInside) break;                 // grid dışına tamamen çıktıysak bitti
+                    if (burst.Count > 0) DestroyBlocks(burst); // o adımda normal blokları yok et
+
+                    yield return new WaitForSeconds(rocketStepDelay);
+                    step++;
+                }
+            }
+            else // vertical
+            {
+                int step = 1;
+                while (true)
+                {
+                    var burst = new List<Vector2Int>();
+
+                    int by = cy - step;
+                    int uy = cy + step;
+
+                    bool anyInside = false;
+
+                    // AŞAĞI hücre
+                    if (by >= 0)
+                    {
+                        anyInside = true;
+                        if (blocks[cx, by] != null)
+                        {
+                            if (blocks[cx, by].IsPowerup)
+                            {
+                                TriggerPowerupAt_FireAndForget(cx, by);
+                            }
+                            else
+                            {
+                                burst.Add(new Vector2Int(cx, by));
+                            }
+                        }
+                    }
+
+                    // YUKARI hücre
+                    if (uy < gridSystem.GridHeight)
+                    {
+                        anyInside = true;
+                        if (blocks[cx, uy] != null)
+                        {
+                            if (blocks[cx, uy].IsPowerup)
+                            {
+                                TriggerPowerupAt_FireAndForget(cx, uy);
+                            }
+                            else
+                            {
+                                burst.Add(new Vector2Int(cx, uy));
+                            }
+                        }
+                    }
+
+                    if (!anyInside) break;
+                    if (burst.Count > 0) DestroyBlocks(burst);
+
+                    yield return new WaitForSeconds(rocketStepDelay);
+                    step++;
+                }
+            }
+
+
+            _resolving = false;
+
+            EndResolve();
+            yield break;
+        }
+
+        private IEnumerator ActivateTNT(int cx, int cy)
+        {
+            BeginResolve();
+            ClearAllHints();
+
+            var normals = new List<Vector2Int>(8);
+            var powerups = new List<Vector2Int>(4);
+
+            // 3x3 alanı dolaş
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    int nx = cx + dx, ny = cy + dy;
+                    if (!gridSystem.IsValidGridPosition(nx, ny)) continue;
+
+                    var b = blocks[nx, ny];
+                    if (b == null) continue;
+
+                    // Merkez TNT (cx,cy): tetikleyici kendisi, powerup listesine ekleme
+                    if (nx == cx && ny == cy) continue;
+
+                    if (b.IsPowerup)
+                        powerups.Add(new Vector2Int(nx, ny));
+                    else
+                        normals.Add(new Vector2Int(nx, ny));
+                }
+            }
+
+            // 1) Önce 3x3 içindeki powerup'ları tetikle (ANINDA)
+            foreach (var p in powerups)
+                TriggerPowerupAt_FireAndForget(p.x, p.y);
+
+            // 2) Sonra 3x3 içindeki NORMAL blokları ve MERKEZ TNT'yi tek seferde yok et
+            normals.Add(new Vector2Int(cx, cy)); // merkez TNT de gitsin
+            if (normals.Count > 0)
+                DestroyBlocks(normals);
+
+            // 3) Zincirin settle'ını merkezi yerden yaptır
+            EndResolve();
+            yield break;
+        }
+
+        private IEnumerator ActivatePuzzle(int cx, int cy, BlockColor targetColor)
+        {
+            BeginResolve();
+
+            _resolving = true;
+            ClearAllHints(); // ekranda eski hint kalmasın
+
+            // 1) Tüm tahtada hedef renkteki NORMAL blokları topla
+            var toBlow = new List<Vector2Int>(gridSystem.GridWidth * gridSystem.GridHeight);
+            for (int x = 0; x < gridSystem.GridWidth; x++)
+            {
+                for (int y = 0; y < gridSystem.GridHeight; y++)
+                {
+                    var b = blocks[x, y];
+                    if (b == null) continue;
+
+                    // Powerup'ları es geç; SADECE normal hedef renk
+                    if (!b.IsPowerup && b.Color == targetColor)
+                        toBlow.Add(new Vector2Int(x, y));
+                }
+            }
+
+            // 2) (opsiyonel basit odak): hepsine kısa süreli Rubik hint'i bas
+            foreach (var p in toBlow)
+                blocks[p.x, p.y]?.ShowHint(HintPowerupKind.Rubik);
+
+            // powerup'ın kendisi (cx,cy) de patlayacağı için oradaki hint'e gerek yok,
+            // ama istersen görsel tutarlılık için dokunma.
+
+            // 3) Odak beklemesi
+            yield return new WaitForSeconds(puzzleFocusDelay);
+
+            // 4) Hintleri temizle ve TEK SEFERDE yok et
+            foreach (var p in toBlow)
+                blocks[p.x, p.y]?.ClearHint();
+
+            // Puzzle’ın kendisi de yok olmalı (merkez powerup)
+            var withCenter = new List<Vector2Int>(toBlow.Count + 1);
+            withCenter.AddRange(toBlow);
+            withCenter.Add(new Vector2Int(cx, cy));
+
+            DestroyBlocks(withCenter);
+
+            _resolving = false;
+
+            EndResolve();
+            yield break;
+        }
+
+        private void BeginResolve()
+        {
+            if (_resolveDepth == 0) _destroyedThisResolve = new HashSet<Vector2Int>();
+            _resolveDepth++;
+            ClearAllHints();
+        }
+        private void EndResolve()
+        {
+            _resolveDepth = Mathf.Max(0, _resolveDepth - 1);
+            if (_resolveDepth == 0)
+            {
+                DropBlocks();
+                SpawnMissingBlocks();
+                _destroyedThisResolve?.Clear();   // <<< eklendi
+                _destroyedThisResolve = null;     // <<< eklendi
+                if (_activeTweens == 0)
+                    eventHub?.BoardSettled?.Invoke();
+            }
+        }
+
+
+        private void TriggerPowerupAt_FireAndForget(int px, int py)
+        {
+            // Aynı powerup aynı anda birden çok kez tetiklenmesin:
+            var key = new Vector2Int(px, py);
+            if (_activatingPowerups.Contains(key)) return;
+
+            _activatingPowerups.Add(key);
+            StartCoroutine(RunPowerupAt(px, py));
+        }
+
+        // Asıl çalıştırıcı: bittiğinde set’ten düşer
+        private IEnumerator RunPowerupAt(int px, int py)
+        {
+            var b = (px >= 0 && px < gridSystem.GridWidth && py >= 0 && py < gridSystem.GridHeight) ? blocks[px, py] : null;
+
+            if (b != null && b.IsPowerup)
+            {
+                // Her powerup kendi BeginResolve/EndResolve'ünü zaten çağırıyor olmalı
+                if (b.PowerupKind == HintPowerupKind.Rocket)
+                    yield return StartCoroutine(ActivateRocket(px, py, b.RocketOrientation));
+                else if (b.PowerupKind == HintPowerupKind.TNT)
+                    yield return StartCoroutine(ActivateTNT(px, py));
+                else if (b.PowerupKind == HintPowerupKind.Rubik)
+                    yield return StartCoroutine(ActivatePuzzle(px, py, GetPowerupTargetColor(b)));
+            }
+
+            _activatingPowerups.Remove(new Vector2Int(px, py));
+        }
+
     }
 }

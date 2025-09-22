@@ -100,4 +100,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: bbafc4faf191bd041b01e8722df9dc96, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  cubeColor: 1
+  blockColor: 0
+  _sr: {fileID: 0}
+  _normalSprite: {fileID: 0}
+  _rocketHintSprite: {fileID: 21300000, guid: 3ffa158610f33a142ad69724cce3527b, type: 2}
+  _tntHintSprite: {fileID: 21300000, guid: 16eab0f9f9af0874fa39a498e8839121, type: 2}
+  _rubikHintSprite: {fileID: 21300000, guid: b7a66d6ff49c1b54183e250e8ce5aaee, type: 2}

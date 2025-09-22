@@ -12,6 +12,8 @@ namespace ToyBlast.Events
         [System.Serializable] public class Int3Event : UnityEvent<int, int, int> { }
 
 
+        [Header("UI / Moves")]
+        public IntEvent MovesChanged;
 
         [Header("Block Events")]
         public IntEvent BlocksDestroyed;   // Patlayan blok adedini yayınlayacağız

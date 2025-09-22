@@ -101,3 +101,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   blockColor: 3
+  _sr: {fileID: 0}
+  _normalSprite: {fileID: 0}
+  _rocketHintSprite: {fileID: 21300000, guid: 452ea02afccf6af41aa9a4718b893810, type: 2}
+  _tntHintSprite: {fileID: 21300000, guid: bc844107be666c64fb34f8151d08400a, type: 2}
+  _rubikHintSprite: {fileID: 21300000, guid: dd1db0f043a637b41951130afa487f8f, type: 2}
